@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>レジデータ抽出ツール (Web版)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/encoding-japanese/2.1.0/encoding.min.js"></script>
+    <style>
+        body { font-family: 'Meiryo', sans-serif; background-color: #f4f5f7; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .container { background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 450px; text-align: center; }
+        h2 { color: #333; margin-bottom: 20px; font-size: 24px; }
+        .drop-zone { border: 2px dashed #4CAF50; background-color: #e8f5e9; padding: 40px 20px; border-radius: 8px; cursor: pointer; color: #555; transition: 0.3s; font-size: 14px; line-height: 1.5; }
+        .drop-zone.dragover { background-color: #c8e6c9; }
+        .file-list { margin-top: 15px; text-align: left; max-height: 100px; overflow-y: auto; font-size: 0.9em; color: #666; }
+        .btn { background-color: #4CAF50; color: white; border: none; padding: 12px 20px; width: 100%; border-radius: 5px; font-size: 16px; font-weight: bold; cursor: pointer; margin-top: 20px; transition: 0.2s;}
+        .btn:hover { background-color: #45a049; }
+        .btn:disabled { background-color: #ccc; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>レジデータ抽出ツール</h2>
+    
+    <div id="drop-zone" class="drop-zone">
+        ここにCSVファイルをドラッグ＆ドロップ<br>またはクリックしてファイルを選択<br>（複数ファイル対応）
+        <input type="file" id="file-input" multiple accept=".csv" style="display: none;">
+    </div>
+
+    <div id="file-list" class="file-list"></div>
+
+    <button id="execute-btn" class="btn" disabled>Excelに変換してダウンロード</button>
+</div>
+
+<script>
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+    const fileListDiv = document.getElementById('file-list');
+    const executeBtn = document.getElementById('execute-btn');
+    let selectedFiles = [];
+
+    // 抽出する項目のリスト
+    const targetColumns = [
+        '営業日', '売上', '消費税', '売上(10%)', '消費税(10%)', '売上(8%)', '消費税(8%)', 
+        '純売上', '値割引件数', '値割引', '現金件数', '現金', 
+        'クレジット件数', 'クレジット', 'ポイント件数', 'ポイント', '電子マネー件数', '電子マネー', 
+        '商品券(釣無し)件数', '商品券(釣無し)', '商品券 差額', '掛売件数', '掛売', 
+        '取消(赤伝票)件数', '取消(赤伝票)', '訂正(黒伝票)件数', '訂正(黒伝票)', 
+        '未回収件数', '未回収金額', '差異合計', '差異理由'
+    ];
+
+    dropZone.addEventListener('click', () => fileInput.click());
+
+    dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropZone.classList.add('dragover');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('dragover');
+        addFiles(e.dataTransfer.files);
+    });
+
+    fileInput.addEventListener('change', (e) => addFiles(e.target.files));
+
+    function addFiles(files) {
+        for (let file of files) {
+            if (file.name.toLowerCase().endsWith('.csv') && !selectedFiles.some(f => f.name === file.name)) {
+                selectedFiles.push(file);
+            }
+        }
+        updateFileList();
+    }
+
+    function updateFileList() {
+        fileListDiv.innerHTML = selectedFiles.map(f => `<div>📄 ${f.name}</div>`).join('');
+        executeBtn.disabled = selectedFiles.length === 0;
+    }
+
+    // 数値化の処理（￥やカンマを除去）
+    function cleanValue(val) {
+        if (!val) return val;
+        let strVal = String(val).replace(/[￥\\,]/g, '').trim();
+        if (strVal === '-') return 0;
+        if (!isNaN(strVal) && strVal !== '') return Number(strVal);
+        return val;
+    }
+
+    // 文字の表示幅を計算する関数（全角・半角判定）
+    function getTextWidth(text) {
+        let width = 0;
+        let str = String(text);
+        for (let i = 0; i < str.length; i++) {
+            // 文字コードが255より大きい場合は全角とみなす
+            if (str.charCodeAt(i) > 255) {
+                width += 1.8;
+            } else {
+                width += 1.1;
+            }
+        }
+        return width;
+    }
+
+    executeBtn.addEventListener('click', async () => {
+        executeBtn.disabled = true;
+        executeBtn.innerText = "処理中...";
+
+        for (let file of selectedFiles) {
+            try {
+                // ファイルの読み込みと文字コードの自動判定
+                const arrayBuffer = await file.arrayBuffer();
+                const uint8Array = new Uint8Array(arrayBuffer);
+                const detected = Encoding.detect(uint8Array);
+                const unicodeArray = Encoding.convert(uint8Array, { to: 'UNICODE', from: detected });
+                let csvText = Encoding.codeToString(unicodeArray);
+
+                let lines = csvText.split('\n').map(line => line.split('\t').map(cell => cell.replace(/^"|"$/g, '')));
+                let headers = lines[0];
+                
+                let colIndices = targetColumns.map(col => headers.indexOf(col)).filter(idx => idx !== -1);
+                let actualHeaders = colIndices.map(idx => headers[idx]);
+
+                const workbook = new ExcelJS.Workbook();
+                const worksheet = workbook.addWorksheet('データ');
+
+                // 【印刷・ページ設定】A4、横向き、余白0.25インチ
+                worksheet.pageSetup.paperSize = 9; 
+                worksheet.pageSetup.orientation = 'landscape';
+                worksheet.pageSetup.margins = { left: 0.25, right: 0.25, top: 0.25, bottom: 0.25, header: 0.3, footer: 0.3 };
+
+                // 【1行目（見出し）の設定】高さ120ポイント
+                let headerRow = worksheet.addRow(actualHeaders);
+                headerRow.height = 120; 
+                headerRow.eachCell((cell) => {
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDDEBF7' } }; // 薄い水色
+                    cell.font = { name: 'Meiryo', size: 11, bold: true, color: { argb: 'FF000000' } };
+                    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+                });
+
+                // 【2行目以降（データ）の設定】
+                for (let i = 1; i < lines.length; i++) {
+                    if (lines[i].length < headers.length) continue; // 空白行をスキップ
+                    
+                    let rowData = colIndices.map(idx => {
+                        let headerName = headers[idx];
+                        let val = lines[i][idx];
+                        return (headerName !== '営業日' && headerName !== '差異理由') ? cleanValue(val) : val;
+                    });
+                    
+                    let row = worksheet.addRow(rowData);
+                    row.height = 25; // データ行の高さ: 25ポイント
+
+                    row.eachCell((cell, colNumber) => {
+                        cell.font = { name: 'Meiryo', size: 11 };
+                        cell.alignment = { vertical: 'middle', horizontal: colNumber === 1 ? 'center' : 'general' };
+                        // 数値ならカンマ区切り
+                        if (typeof cell.value === 'number') {
+                            cell.numFmt = '#,##0'; 
+                        }
+                    });
+                }
+
+                // 【列幅の自動調整（データの中身を基準にする）】
+                worksheet.columns.forEach((col) => {
+                    let maxDataWidth = 0;
+                    
+                    col.eachCell({ includeEmpty: true }, (cell, rowNumber) => {
+                        // 見出し行（1行目）は幅計算に含めない
+                        if (rowNumber > 1) {
+                            let textToCalc = "";
+                            if (typeof cell.value === 'number') {
+                                textToCalc = cell.value.toLocaleString(); // カンマ込みの文字数で計算
+                            } else {
+                                textToCalc = cell.value ? String(cell.value) : "";
+                            }
+                            let currentWidth = getTextWidth(textToCalc);
+                            if (currentWidth > maxDataWidth) {
+                                maxDataWidth = currentWidth;
+                            }
+                        }
+                    });
+                    
+                    // 少し余裕を持たせて幅を設定（最低幅4.0）
+                    col.width = Math.max(maxDataWidth + 1.5, 4.0);
+                });
+
+                // 【ウィンドウ枠の固定】B2セル基準で固定（1行目と1列目を固定）
+                worksheet.views = [{ state: 'frozen', xSplit: 1, ySplit: 1 }];
+
+                // ダウンロード処理
+                const buffer = await workbook.xlsx.writeBuffer();
+                const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+                const downloadUrl = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = downloadUrl;
+                a.download = file.name.replace('.csv', '_extracted.xlsx');
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+
+            } catch (error) {
+                console.error("エラー:", error);
+                alert(`${file.name} の処理中にエラーが発生しました。`);
+            }
+        }
+
+        selectedFiles = [];
+        updateFileList();
+        executeBtn.innerText = "Excelに変換してダウンロード";
+    });
+</script>
+</body>
+</html>
